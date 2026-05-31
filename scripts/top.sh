@@ -6,9 +6,21 @@ show_help() {
 Usage: bash scripts/top.sh [options]
 
 Options:
-  -0, --once       Run one snapshot and exit
-  -d SECONDS       Delay between updates when running continuously (default: 2)
-  -h, --help       Show this help message
+  -0, --once           Run one snapshot and exit
+  -d SECONDS, --delay SECONDS
+                       Delay between updates when running continuously (default: 2)
+  -o FIELD, --order FIELD
+                       Sort processes by FIELD (cpu, mem, pid, vsz, rss, command) (default: cpu)
+                       When using `command`, the list is sorted alphabetically by process command name.
+  -n COUNT, --count COUNT
+                       Number of processes to show (default: 15)
+  -h, --help           Show this help message
+
+Interactive commands (press ':' while running):
+  :o FIELD   Change sort order to cpu, mem, pid, vsz, rss, or command (alphabetical)
+  :n COUNT   Change process count
+  :d SECONDS Change refresh delay
+  :q         Quit
 EOF
 }
 
@@ -54,7 +66,7 @@ get_cpu_summary() {
 }
 
 print_header() {
-  printf "top - %s  up %s,  load average: %s\n" "$(date '+%H:%M:%S')" "$(get_uptime)" "$(get_load_averages)"
+  printf "top - %s  up %s,  load average: %s  order: %s  count: %s\n" "$(date '+%H:%M:%S')" "$(get_uptime)" "$(get_load_averages)" "$order_field" "$process_count"
 }
 
 print_tasks() {
@@ -71,10 +83,89 @@ print_tasks() {
   fi
 }
 
+print_interactive_hint() {
+  printf "Commands: :o cpu | :o mem | :o pid | :o vsz | :o rss | :o command | :n COUNT | :d SECONDS | :q\n"
+}
+
+get_ps_sort_option() {
+  case "$order_field" in
+    cpu) printf -- "-pcpu" ;;
+    mem) printf -- "-pmem" ;;
+    pid) printf -- "pid" ;;
+    vsz) printf -- "-vsz" ;;
+    rss) printf -- "-rss" ;;
+    cmd|command) printf -- "comm" ;;
+    *) printf -- "-pcpu" ;;
+  esac
+}
+
+handle_command_string() {
+  local raw_cmd="${1#:}"
+  local cmd arg
+  read -r cmd arg <<< "$raw_cmd"
+  case "$cmd" in
+    o|order)
+      if [[ "$arg" =~ ^(cpu|mem|pid|vsz|rss|cmd|command)$ ]]; then
+        order_field="$arg"
+      else
+        printf "Invalid order field: %s\n" "$arg" >&2
+      fi
+      ;;
+    n|count)
+      if [[ "$arg" =~ ^[0-9]+$ ]] && [[ "$arg" -ge 1 ]]; then
+        process_count="$arg"
+      else
+        printf "Invalid count: %s\n" "$arg" >&2
+      fi
+      ;;
+    d|delay)
+      if [[ "$arg" =~ ^[0-9]+([.][0-9]+)?$ ]] && awk "BEGIN { exit !($arg > 0) }"; then
+        delay="$arg"
+      else
+        printf "Invalid delay: %s\n" "$arg" >&2
+      fi
+      ;;
+    q|quit)
+      exit_requested=1
+      ;;
+    h|help)
+      show_help
+      ;;
+    *)
+      printf "Unknown command: %s\n" "$cmd" >&2
+      ;;
+  esac
+}
+
+read_interactive_command() {
+  local tty=/dev/tty
+  local command_char
+  if [[ ! -r "$tty" || ! -w "$tty" ]]; then
+    return 1
+  fi
+
+  if read -rsn1 -t 0.2 command_char <"$tty"; then
+    if [[ "$command_char" != ":" ]]; then
+      return 1
+    fi
+    printf '\n: ' >"$tty"
+    local command_line
+    if ! IFS= read -r command_line <"$tty"; then
+      return 1
+    fi
+    handle_command_string ":$command_line"
+    return 0
+  fi
+
+  return 1
+}
+
 print_process_table() {
   printf "  %5s %-8s %-5s %5s %5s %8s %8s %8s %s\n" PID USER STAT CPU%% MEM%% VSZ RSS TIME COMMAND
   if command -v ps >/dev/null 2>&1; then
-    ps -eo pid,user,stat,pcpu,pmem,vsz,rss,time,comm --sort=-pcpu 2>/dev/null | awk 'NR>1 {printf "  %5s %-8s %-5s %5s %5s %8s %8s %8s %s\n", $1, $2, $3, $4, $5, $6, $7, $8, $9}' | head -n 10
+    local sort_option
+    sort_option=$(get_ps_sort_option)
+    ps -eo pid,user,stat,pcpu,pmem,vsz,rss,time,comm --sort="$sort_option" 2>/dev/null | awk 'NR>1 {printf "  %5s %-8s %-5s %5s %5s %8s %8s %8s %s\n", $1, $2, $3, $4, $5, $6, $7, $8, $9}' | head -n "$process_count"
   else
     printf "  [process list unavailable]\n"
   fi
@@ -83,6 +174,9 @@ print_process_table() {
 main() {
   local single_shot=0
   local delay=2
+  local order_field="cpu"
+  local process_count=15
+  local exit_requested=0
 
   if [[ $# -eq 0 ]]; then
     show_help
@@ -98,6 +192,25 @@ main() {
       -d|--delay)
         shift
         delay="${1:-2}"
+        shift
+        ;;
+      -o|--order)
+        shift
+        order_field="${1:-cpu}"
+        if ! [[ "$order_field" =~ ^(cpu|mem|pid|vsz|rss|cmd|command)$ ]]; then
+          printf 'Invalid order field: %s\n' "$order_field" >&2
+          show_help
+          exit 1
+        fi
+        shift
+        ;;
+      -n|--count)
+        shift
+        process_count="${1:-15}"
+        if ! [[ "$process_count" =~ ^[0-9]+$ ]] || [[ "$process_count" -lt 1 ]]; then
+          printf 'Invalid count: %s\n' "$process_count" >&2
+          exit 1
+        fi
         shift
         ;;
       -h|--help)
@@ -121,12 +234,23 @@ main() {
     get_cpu_summary
     get_memory_summary
     print_process_table
+    print_interactive_hint
 
-    if [[ $single_shot -eq 1 ]]; then
+    if [[ $single_shot -eq 1 || $exit_requested -eq 1 ]]; then
       break
     fi
+
+    if read_interactive_command; then
+      if [[ $exit_requested -eq 1 ]]; then
+        break
+      fi
+      continue
+    fi
+
     sleep "$delay"
   done
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
