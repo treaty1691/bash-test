@@ -29,3 +29,4 @@ A small Bash shell scripting workspace with a standard layout for VS Code.
 - `scripts/main.sh` — entry point
 - `scripts/utils.sh` — helper functions
 - `scripts/bash-error-techniques.sh` — demonstrates Bash error-handling techniques, traps, timeout handling, and safe scripting patterns
+- `scripts/top.sh` — lightweight Bash emulation of Linux `top` with a `-0` one-shot snapshot option
